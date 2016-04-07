@@ -187,7 +187,7 @@ class Client(BaseClient):
 
     def revoke(self, user, name):
         # Replace with your implementation (not needed for Part 1)
-        info = self.get_information
+        info = self.get_information()
         if name not in info["files_I_own"]:
             return
         new_k_e = self.crypto.get_random_bytes(16)
@@ -202,7 +202,7 @@ class Client(BaseClient):
                 secret = {"k_e": new_k_e,
                           "k_a": new_k_a,
                           "r": r,
-                          "from_user": username}
+                          "from_user": self.username}
                 secret_string = to_json_string(secret)
                 encrypted_secret = self.crypto.asymmetric_encrypt(secret_string,
                                                                   self.pks.get_public_key(person[0]))
@@ -213,9 +213,9 @@ class Client(BaseClient):
 
         info["files_I_shared"][name] = {
                     "users": users,  # using list, maybe run time is slow when lookup?
-                    "shared_k_e": new_k_e,
-                    "shared_k_a": new_k_a,
-                    "shared_k_n": new_k_n,
+                    "k_e": new_k_e,
+                    "k_a": new_k_a,
+                    "k_n": new_k_n,
                     "r": r
                 }
 

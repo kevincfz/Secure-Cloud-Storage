@@ -13,3 +13,4 @@ run_part2_tests.py
 servers.py
 servers.pyc
 util.py
+client.pyc
