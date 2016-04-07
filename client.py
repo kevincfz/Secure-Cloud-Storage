@@ -195,7 +195,7 @@ class Client(BaseClient):
         new_k_n = self.crypto.get_random_bytes(16)
         name_key = name + new_k_n
         r = self.crypto.cryptographic_hash(name_key, hash_name='SHA256')
-        users = info["files_I_shared"][name]["users"]
+        users = info["files_I_own"][name]["users"]
 
         for person in users:
             if person[0] != user:
@@ -211,7 +211,7 @@ class Client(BaseClient):
             else:
                 users.remove(person)
 
-        info["files_I_shared"][name] = {
+        info["files_I_own"][name] = {
                     "users": users,  # using list, maybe run time is slow when lookup?
                     "k_e": new_k_e,
                     "k_a": new_k_a,
