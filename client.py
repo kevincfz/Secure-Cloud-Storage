@@ -30,48 +30,42 @@ class Client(BaseClient):
         super().__init__(storage_server, public_key_server, crypto_object,
                          username)
 
-        # get keys
-        k_e = self.crypto.get_random_bytes(16)
-        k_a = self.crypto.get_random_bytes(16)
-        k_n = self.crypto.get_random_bytes(16)
 
         # Store the client's information node
         info = {}
-        info["k_e"] = k_e
-        info["k_a"] = k_a
-        info["k_n"] = k_n
-        info["files_I_shared"] = {}
+        info["files_I_own"] = {}
         info["files_shared_to_me"] = {}
-
-        self.info = info
 
         self.update_information(info)
 
     def upload(self, name, value):
+
         info = self.get_information()
 
-        # files that own
-        if name not in info["files_shared_to_me"]:
-            k_e = info["k_e"]
-            k_a = info["k_a"]
-            k_n = info["k_n"]
-            # files that own, and i have shared
-            if name in info["files_I_shared"]:
-                k_e = info["files_I_shared"][name]["shared_k_e"]
-                k_a = info["files_I_shared"][name]["shared_k_a"]
-                k_n = info["files_I_shared"][name]["shared_k_n"]
-
+        if name in info["files_I_own"]:
+            k_e = info["files_I_own"][name]["k_e"]
+            k_a = info["files_I_own"][name]["k_a"]
+            r = info["files_I_own"][name]["r"]
+            username = self.username
+        elif name in info["files_shared_to_me"]:
+            k_e = info["files_shared_to_me"][name]["k_e"]
+            k_a = info["files_shared_to_me"][name]["k_a"]
+            r = info["files_shared_to_me"][name]["r"]
+            username = info["files_shared_to_me"][name]["from_user"]
+        else:
+            k_e = self.crypto.get_random_bytes(16)
+            k_a = self.crypto.get_random_bytes(16)
+            k_n = self.crypto.get_random_bytes(16)
             name_key = name + k_n
             r = self.crypto.cryptographic_hash(name_key, hash_name='SHA256')
-            user_name = self.username
+            username = self.username
+            info["files_I_own"][name] = {}
+            info["files_I_own"][name]["k_e"] = k_e
+            info["files_I_own"][name]["k_a"] = k_a
+            info["files_I_own"][name]["r"] = r
+            info["files_I_own"][name]["users"] = []
+            self.update_information(info)
 
-        # files that i do not own, but shared to me
-        else:
-            secret = info["files_shared_to_me"][name]
-            k_e = secret["shared_k_e"]
-            k_a = secret["shared_k_a"]
-            r = secret["r"]
-            user_name = secret["from_username"]
 
         # use k_e to encrypt the file
         crypto_iv = self.crypto.get_random_bytes(16)
@@ -84,7 +78,7 @@ class Client(BaseClient):
                                       "encrypted_file": encrypted_file})
 
         # use k_n to generate a confidential filename
-        data_path = path_join(user_name, r)
+        data_path = path_join(username, r)
         self.storage_server.put(data_path, cipher_text)
 
         # use k_a to generate a MAC code of cipher_text and name (to avoid CreateFakeKey)
@@ -92,45 +86,36 @@ class Client(BaseClient):
         MAC_tag = self.crypto.message_authentication_code(MAC_data,
                                                           k_a,
                                                           hash_name='SHA256')
-        MAC_path = path_join(user_name, "metadata", r)
+        MAC_path = path_join(username, "metadata", r)
         self.storage_server.put(MAC_path, MAC_tag)
 
     def download(self, name):
         info = self.get_information()
 
-        # files that own
-        if name not in info["files_shared_to_me"]:
-            k_e = info["k_e"]
-            k_a = info["k_a"]
-            k_n = info["k_n"]
-
-            # files that own, and i have shared
-            if name in info["files_I_shared"]:
-                k_e = info["files_I_shared"][name]["shared_k_e"]
-                k_a = info["files_I_shared"][name]["shared_k_a"]
-                k_n = info["files_I_shared"][name]["shared_k_n"]
-
-            name_key = name + k_n
-            r = self.crypto.cryptographic_hash(name_key, hash_name='SHA256')
-            user_name = self.username
-
-        # files that i do not own, but shared to me
+        if name in info["files_I_own"]:
+            k_e = info["files_I_own"][name]["k_e"]
+            k_a = info["files_I_own"][name]["k_a"]
+            r = info["files_I_own"][name]["r"]
+            username = self.username
+        elif name in info["files_shared_to_me"]:
+            k_e = info["files_shared_to_me"][name]["k_e"]
+            k_a = info["files_shared_to_me"][name]["k_a"]
+            r = info["files_shared_to_me"][name]["r"]
+            username = info["files_shared_to_me"][name]["from_user"]
         else:
-            secret = info["files_shared_to_me"][name]
-            k_e = secret["shared_k_e"]
-            k_a = secret["shared_k_a"]
-            r = secret["r"]
-            user_name = secret["from_username"]
+            return
 
         # Get the data using k_n
-        data_path = path_join(user_name, r)
+        data_path = path_join(username, r)
         cipher_text = self.storage_server.get(data_path)
 
         # Verify cipher_text if not none
         if cipher_text:
             MAC_data = cipher_text + r
-            MAC_tag_computed = self.crypto.message_authentication_code(MAC_data, k_a, hash_name='SHA256')
-            MAC_path = path_join(user_name, "metadata", r)
+            MAC_tag_computed = self.crypto.message_authentication_code(MAC_data, 
+                                                                       k_a, 
+                                                                       hash_name='SHA256')
+            MAC_path = path_join(username, "metadata", r)
             MAC_tag = self.storage_server.get(MAC_path)
 
             if MAC_tag != MAC_tag_computed:
@@ -149,72 +134,61 @@ class Client(BaseClient):
                 return data
             except ValueError:
                 raise IntegrityError("Data compromised, possibly IV is messed up!")
+
         return None
 
     def share(self, user, name):
         info = self.get_information()
         link = self.crypto.get_random_bytes(16)
 
-
-        # In this case, I do not own this file, this file is shared to me
-        if name in info["files_shared_to_me"]:
-            shared_k_a = info["files_shared_to_me"][name]["shared_k_a"]
-            shared_k_e = info["files_shared_to_me"][name]["shared_k_e"]
-
+        if name in info["files_I_own"]:
+            k_e = info["files_I_own"][name]["k_e"]
+            k_a = info["files_I_own"][name]["k_a"]
+            r = info["files_I_own"][name]["r"]
+            username = self.username
+            if ((user, link)) not in info["files_I_own"][name]["users"]:
+                info["files_I_own"][name]["users"].append((user, link))
+            self.update_information(info)
+        elif name in info["files_shared_to_me"]:
+            k_e = info["files_shared_to_me"][name]["k_e"]
+            k_a = info["files_shared_to_me"][name]["k_a"]
+            r = info["files_shared_to_me"][name]["r"]
+            username = info["files_shared_to_me"][name]["from_user"]
         else:
-            if name not in info["files_I_shared"]:
-                shared_k_e = self.crypto.get_random_bytes(16)
-                shared_k_a = self.crypto.get_random_bytes(16)
-                shared_k_n = self.crypto.get_random_bytes(16)
+            return
 
-                # Get a new name_key and new R, upload this to the new R
-                name_key = name + shared_k_n
-                r = self.crypto.cryptographic_hash(name_key, hash_name='SHA256')
-                self.upload(name, self.download(name))
-
-                info["files_I_shared"][name] = {
-                    "users": [(user, link)],  # using list, maybe run time is slow when lookup?
-                    "shared_k_e": shared_k_e,
-                    "shared_k_a": shared_k_a,
-                    "shared_k_n": shared_k_n,
-                    "r": r
-                }
-            else:
-                info["files_I_shared"][name]["users"].append((user, link))
-
-            shared_k_e = info["files_I_shared"][name]["shared_k_n"]
-            shared_k_a = info["files_I_shared"][name]["shared_k_a"]
-            r = info["files_I_shared"][name]["r"]
-
-            secret = {"r": r,
-                      "shared_k_e": shared_k_e,
-                      "shared_k_a": shared_k_a,
-                      "from_username": self.username}
-            secret_string = to_json_string(secret)
-            encrypted_secret = self.crypto.asymmetric_encrypt(secret_string,
-                                                              self.pks.get_public_key(user))
-            self.storage_server.put(path_join(self.username, "shared", user, link),
-                                    encrypted_secret)
-            link_signature = self.crypto.asymmetric_sign(link, self.private_key)
-            return link, link_signature
+        secret = {"k_e": k_e,
+                  "k_a": k_a,
+                  "r": r,
+                  "from_user": username}
+        secret_string = to_json_string(secret)
+        encrypted_secret = self.crypto.asymmetric_encrypt(secret_string, self.pks.get_public_key(user))
+        self.storage_server.put(path_join(self.username, "shared", user, link),
+                                encrypted_secret)
+        signed_link = self.crypto.asymmetric_sign(link, self.private_key)
+        return link, signed_link
 
     def receive_share(self, from_username, newname, message):
+        # Replace with your implementation (not needed for Part 1)
         link = message[0]
         link_signature = message[1]
         verify = self.crypto.asymmetric_verify(link, link_signature, self.pks.get_public_key(from_username))
         if not verify:
             raise IntegrityError("Link is modified during transmission, don't click")
+
         encrypted_secret = self.storage_server.get(path_join(from_username, "shared", self.username, link))
         secret_string = self.crypto.asymmetric_decrypt(encrypted_secret, self.private_key)
         secret = from_json_string(secret_string)
         # secret["from_username"] = from_username
         info = self.get_information()
         info["files_shared_to_me"][newname] = secret
+        self.update_information(info)
+
 
     def revoke(self, user, name):
         # Replace with your implementation (not needed for Part 1)
-        info = self.get_information()
-        if name not in info["files_I_shared"]:
+        info = self.get_information
+        if name not in info["files_I_own"]:
             return
         new_k_e = self.crypto.get_random_bytes(16)
         new_k_a = self.crypto.get_random_bytes(16)
@@ -225,9 +199,10 @@ class Client(BaseClient):
 
         for person in users:
             if person[0] != user:
-                secret = {"r": r,
-                          "shared_k_e": new_k_e,
-                          "shared_k_a": new_k_a}
+                secret = {"k_e": new_k_e,
+                          "k_a": new_k_a,
+                          "r": r,
+                          "from_user": username}
                 secret_string = to_json_string(secret)
                 encrypted_secret = self.crypto.asymmetric_encrypt(secret_string,
                                                                   self.pks.get_public_key(person[0]))
@@ -245,7 +220,9 @@ class Client(BaseClient):
                 }
 
         data = self.download(name)
+        self.update_information(info)
         self.upload(name, data)
+
 
     def get_information(self):
         """
@@ -263,8 +240,17 @@ class Client(BaseClient):
         if not verify:
             raise IntegrityError("Meta Information do not verify.")
 
-        info_string = self.crypto.asymmetric_decrypt(encrypted_information, private_key)
-        info = from_json_string(info_string)
+        encrypted_info = from_json_string(encrypted_information)
+        k = self.crypto.asymmetric_decrypt(encrypted_info["encrypted_k"], private_key)
+        iv = encrypted_info["crypto_iv"]
+        data = encrypted_info["encrypted_info"]
+        info = self.crypto.symmetric_decrypt(data,
+                                             k,
+                                             cipher_name='AES',
+                                             mode_name='CBC',
+                                             iv=iv)
+        info = from_json_string(info)
+
         return info
 
     def update_information(self, new_info):
@@ -274,19 +260,29 @@ class Client(BaseClient):
         :param new_info: updated info, a dictionary
         :return: nothing
         """
+        k = self.crypto.get_random_bytes(16)
         public_key = self.private_key.publickey()
         info_path = path_join("information", self.username)
 
         new_info_string = to_json_string(new_info)
         signature_path = path_join("information", self.username, "signature")
 
-        encrypted_info = self.crypto.asymmetric_encrypt(new_info_string, public_key)
-        encrypted_keys_signature = self.crypto.asymmetric_sign(encrypted_info,
-                                                               self.private_key)
+        crypto_iv = self.crypto.get_random_bytes(16)
 
-        self.storage_server.put(info_path, encrypted_info)
-        self.storage_server.put(signature_path, encrypted_keys_signature)
+        encrypted_info = self.crypto.symmetric_encrypt(new_info_string, k,
+                                                       cipher_name='AES',
+                                                       mode_name='CBC',
+                                                       iv=crypto_iv)
+        encrypted_k = self.crypto.asymmetric_encrypt(k, public_key)
 
+        cipher_text = to_json_string({"encrypted_k": encrypted_k,
+                                      "crypto_iv":  crypto_iv,
+                                      "encrypted_info": encrypted_info})
+
+        signed_info = self.crypto.asymmetric_sign(cipher_text, self.private_key)
+
+        self.storage_server.put(info_path, cipher_text)
+        self.storage_server.put(signature_path, signed_info)
 
 
 
