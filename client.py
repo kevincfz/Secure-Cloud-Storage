@@ -77,11 +77,9 @@ class Client(BaseClient):
         cipher_text = to_json_string({"crypto_iv":  crypto_iv,
                                       "encrypted_file": encrypted_file})
 
-        # use k_n to generate a confidential filename
         data_path = path_join(username, r)
         self.storage_server.put(data_path, cipher_text)
 
-        # use k_a to generate a MAC code of cipher_text and name (to avoid CreateFakeKey)
         MAC_data = cipher_text + r
         MAC_tag = self.crypto.message_authentication_code(MAC_data,
                                                           k_a,
@@ -103,7 +101,7 @@ class Client(BaseClient):
             r = info["files_shared_to_me"][name]["r"]
             username = info["files_shared_to_me"][name]["from_user"]
         else:
-            return
+            return None
 
         # Get the data using k_n
         data_path = path_join(username, r)
@@ -145,8 +143,10 @@ class Client(BaseClient):
             k_a = info["files_I_own"][name]["k_a"]
             r = info["files_I_own"][name]["r"]
             username = self.username
-            if (user, link) not in info["files_I_own"][name]["users"]:
+            if user not in [tuple[0] for tuple in info["files_I_own"][name]["users"]]:
                 info["files_I_own"][name]["users"].append((user, link))
+            else:
+                raise ValueError("You have already shared this file to this person.")
             self.update_information(info)
         elif name in info["files_shared_to_me"]:
             k_e = info["files_shared_to_me"][name]["k_e"]
@@ -213,7 +213,6 @@ class Client(BaseClient):
                     "users": users,  # using list, maybe run time is slow when lookup?
                     "k_e": new_k_e,
                     "k_a": new_k_a,
-                    "k_n": new_k_n,
                     "r": r
                 }
 
