@@ -14,3 +14,4 @@ servers.py
 servers.pyc
 util.py
 client.pyc
+.idea/
