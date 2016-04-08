@@ -29,14 +29,15 @@ class Client(BaseClient):
                  username):
         super().__init__(storage_server, public_key_server, crypto_object,
                          username)
+        info_path = path_join("information", username)
+        if not self.storage_server.get(info_path):
 
+            # Store the client's information node
+            info = {}
+            info["files_I_own"] = {}
+            info["files_shared_to_me"] = {}
 
-        # Store the client's information node
-        info = {}
-        info["files_I_own"] = {}
-        info["files_shared_to_me"] = {}
-
-        self.update_information(info)
+            self.update_information(info)
 
     def upload(self, name, value):
 
@@ -65,7 +66,6 @@ class Client(BaseClient):
             info["files_I_own"][name]["r"] = r
             info["files_I_own"][name]["users"] = []
             self.update_information(info)
-
 
         # use k_e to encrypt the file
         crypto_iv = self.crypto.get_random_bytes(16)
@@ -134,7 +134,6 @@ class Client(BaseClient):
                 return data
             except ValueError:
                 raise IntegrityError("Data compromised, possibly IV is messed up!")
-
         return None
 
     def share(self, user, name):
@@ -146,7 +145,7 @@ class Client(BaseClient):
             k_a = info["files_I_own"][name]["k_a"]
             r = info["files_I_own"][name]["r"]
             username = self.username
-            if ((user, link)) not in info["files_I_own"][name]["users"]:
+            if (user, link) not in info["files_I_own"][name]["users"]:
                 info["files_I_own"][name]["users"].append((user, link))
             self.update_information(info)
         elif name in info["files_shared_to_me"]:
@@ -183,7 +182,6 @@ class Client(BaseClient):
         info = self.get_information()
         info["files_shared_to_me"][newname] = secret
         self.update_information(info)
-
 
     def revoke(self, user, name):
         # Replace with your implementation (not needed for Part 1)
@@ -223,7 +221,6 @@ class Client(BaseClient):
         self.update_information(info)
         self.upload(name, data)
 
-
     def get_information(self):
         """
         :return: The decrypted dictionary stored at /information/<self.username>
@@ -260,7 +257,7 @@ class Client(BaseClient):
         :param new_info: updated info, a dictionary
         :return: nothing
         """
-        k = self.crypto.get_random_bytes(16)
+        symmetric_key = self.crypto.get_random_bytes(16)
         public_key = self.private_key.publickey()
         info_path = path_join("information", self.username)
 
@@ -269,11 +266,11 @@ class Client(BaseClient):
 
         crypto_iv = self.crypto.get_random_bytes(16)
 
-        encrypted_info = self.crypto.symmetric_encrypt(new_info_string, k,
+        encrypted_info = self.crypto.symmetric_encrypt(new_info_string, symmetric_key,
                                                        cipher_name='AES',
                                                        mode_name='CBC',
                                                        iv=crypto_iv)
-        encrypted_k = self.crypto.asymmetric_encrypt(k, public_key)
+        encrypted_k = self.crypto.asymmetric_encrypt(symmetric_key, public_key)
 
         cipher_text = to_json_string({"encrypted_k": encrypted_k,
                                       "crypto_iv":  crypto_iv,
@@ -283,7 +280,4 @@ class Client(BaseClient):
 
         self.storage_server.put(info_path, cipher_text)
         self.storage_server.put(signature_path, signed_info)
-
-
-
 
