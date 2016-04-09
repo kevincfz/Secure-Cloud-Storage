@@ -52,7 +52,8 @@ class Client(BaseClient):
         elif name in info["files_shared_to_me"]:
             link = info["files_shared_to_me"][name][0]
             from_username = info["files_shared_to_me"][name][1]
-            secret = self.get_linked_data(link, from_username)
+            from_origin = info["files_shared_to_me"][name][2]
+            secret = self.get_linked_data(link, from_username, from_origin)
             k_e = secret["k_e"]
             k_a = secret["k_a"]
             r = secret["r"]
@@ -104,7 +105,8 @@ class Client(BaseClient):
         elif name in info["files_shared_to_me"]:
             link = info["files_shared_to_me"][name][0]
             from_username = info["files_shared_to_me"][name][1]
-            secret = self.get_linked_data(link, from_username)
+            from_origin = info["files_shared_to_me"][name][2]
+            secret = self.get_linked_data(link, from_username, from_origin)
             k_e = secret["k_e"]
             k_a = secret["k_a"]
             r = secret["r"]
@@ -161,7 +163,8 @@ class Client(BaseClient):
         elif name in info["files_shared_to_me"]:
             infolink = info["files_shared_to_me"][name][0]
             from_username = info["files_shared_to_me"][name][1]
-            secret = self.get_linked_data(infolink, from_username)
+            from_origin = info["files_shared_to_me"][name][2]
+            secret = self.get_linked_data(infolink, from_username, from_origin)
             k_e = secret["k_e"]
             k_a = secret["k_a"]
             r = secret["r"]
@@ -178,17 +181,23 @@ class Client(BaseClient):
 
         self.storage_server.put(path_join(user, "shared", link),
                                 to_json_string(linked_data))
-        signed_link = self.crypto.asymmetric_sign(link, self.private_key)
-        return link, signed_link
+        msg = {}
+        msg["link"] = link
+        msg["origin"] = username
+        msg_signature = self.crypto.asymmetric_sign(to_json_string(msg), self.private_key)
+        return to_json_string(msg), msg_signature
 
     def receive_share(self, from_username, newname, message):
         if message is None:
             raise ValueError("You received empty message")
-        link = message[0]
-        link_signature = message[1]
-        verify = self.crypto.asymmetric_verify(link, link_signature, self.pks.get_public_key(from_username))
+        msg_string, msg_signature = message
+        verify = self.crypto.asymmetric_verify(msg_string, msg_signature, self.pks.get_public_key(from_username))
         if not verify:
             raise IntegrityError("Link is modified during transmission, don't click")
+
+        msg = from_json_string(msg_string)
+        link = msg["link"]
+        origin = msg["origin"]
 
         # prepare a route for sharing shared files
         children_path = path_join(self.username, "shared", link, "children")
@@ -199,7 +208,7 @@ class Client(BaseClient):
         self.storage_server.put(children_path, to_json_string(children_data))
 
         info = self.get_information()
-        info["files_shared_to_me"][newname] = (link, from_username)
+        info["files_shared_to_me"][newname] = [link, from_username, origin]
         # So that we know where the link come from, so that we know whose public key we should use to verify
         self.update_information(info)
 
@@ -337,15 +346,15 @@ class Client(BaseClient):
 
         return linked_data
 
-    def get_linked_data(self, link, link_fromuser):
+    def get_linked_data(self, link, link_fromuser, link_origin):
         """
         Get linked data, and validate its integrity,
 
         :param new_info: updated info, a dictionary
         :return: secret, only if the integrity is not violated
         """
-
-        linked_data = self.storage_server.get(path_join(self.username, "shared", link))
+        data_path = path_join(self.username, "shared", link)
+        linked_data = self.storage_server.get(data_path)
         linked_data = from_json_string(linked_data)
 
         encrypted_secret = linked_data["encrypted_secret"]
@@ -354,7 +363,10 @@ class Client(BaseClient):
         crypto_iv = linked_data["iv"]
         verify = self.crypto.asymmetric_verify(encrypted_secret + encrypted_key + crypto_iv, signature,
                                                self.pks.get_public_key(link_fromuser))
-        if not verify:
+        verify_origin = self.crypto.asymmetric_verify(encrypted_secret + encrypted_key + crypto_iv, signature,
+                                                      self.pks.get_public_key(link_origin))
+
+        if not (verify or verify_origin):
             raise IntegrityError("linked data has been compromised")
 
         symmetric_key = self.crypto.asymmetric_decrypt(encrypted_key, self.private_key)
