@@ -166,7 +166,7 @@ class Client(BaseClient):
             k_a = secret["k_a"]
             r = secret["r"]
             username = secret["from_user"]
-
+            self.update_children_directory(infolink, (user, link))
         else:
             return None
 
@@ -190,10 +190,17 @@ class Client(BaseClient):
         if not verify:
             raise IntegrityError("Link is modified during transmission, don't click")
 
+        # prepare a route for sharing shared files
+        children_path = path_join(self.username, "shared", link, "children")
+        children_data = {"children": []}
+        children_signature = self.crypto.asymmetric_sign(to_json_string(children_data["children"]),
+                                                         self.private_key)
+        children_data["signature"] = children_signature
+        self.storage_server.put(children_path, to_json_string(children_data))
+
         info = self.get_information()
         info["files_shared_to_me"][newname] = (link, from_username)
-                                                     # So that we know where the link come from,
-                                                     # so that we know whose public key we should use to verify
+        # So that we know where the link come from, so that we know whose public key we should use to verify
         self.update_information(info)
 
     def revoke(self, user, name):
@@ -206,33 +213,38 @@ class Client(BaseClient):
         new_k_n = self.crypto.get_random_bytes(16)
         name_key = name + new_k_n
         r = self.crypto.cryptographic_hash(name_key, hash_name='SHA256')
-        users = info["files_I_own"][name]["users"]
+        rootchildren = info["files_I_own"][name]["users"]
+        goodusers = []
 
         to_remove = []
-
-        for person in users:
-            if person[0] != user:
-                gooduser = person[0]
-                gooduser_link = person[1]
-
-                secret = {"k_e": new_k_e,
-                          "k_a": new_k_a,
-                          "r": r,
-                          "from_user": self.username}
-
-                linked_data = self.generate_linked_data(secret, gooduser)
-                self.storage_server.put(path_join(gooduser, "shared", gooduser_link),
-                                        to_json_string(linked_data))
-
-            else:
-                to_remove.append(person)
+        for rootchild in rootchildren:
+            if rootchild[0] == user:
+                to_remove.append(rootchild)
+                break
 
         while to_remove:
-            person = to_remove.pop()
-            users.remove(person)
+            baduser = to_remove.pop()
+            rootchildren.remove(baduser)
+
+        goodusers.extend(rootchildren)
+        more_children = self.get_all_descendant(rootchildren)
+        goodusers.extend(more_children)
+
+        for gooduser in goodusers:
+            gooduser_name = gooduser[0]
+            gooduser_link = gooduser[1]
+
+            secret = {"k_e": new_k_e,
+                      "k_a": new_k_a,
+                      "r": r,
+                      "from_user": self.username}
+
+            linked_data = self.generate_linked_data(secret, gooduser_name)
+            self.storage_server.put(path_join(gooduser_name, "shared", gooduser_link),
+                                    to_json_string(linked_data))
 
         info["files_I_own"][name] = {
-                    "users": users,  # using list, maybe run time is slow when lookup?
+                    "users": rootchildren,
                     "k_e": new_k_e,
                     "k_a": new_k_a,
                     "r": r
@@ -325,7 +337,6 @@ class Client(BaseClient):
 
         return linked_data
 
-
     def get_linked_data(self, link, link_fromuser):
         """
         Get linked data, and validate its integrity,
@@ -357,4 +368,71 @@ class Client(BaseClient):
         except ValueError:
             raise IntegrityError("symmetric decryption failed during getting linked data, IV messed up?")
 
+    def get_all_descendant(self, rootchildren):
+        from collections import deque
+        """
+        Get a all descendants of rootchildren, using BFS
+        :param rootchildren:
+        :return:
+        """
+        descendants = []
+        children_queue = deque(rootchildren)
+        while children_queue:
+            child = children_queue.popleft()
+            children = self.get_children(child[0], child[1])
 
+            for c in children:
+                descendants.append(c)
+                # so we record all the children
+                children_queue.append(c)
+                # so we run the BFS
+        return descendants
+
+    def update_children_directory(self, link, user_to_share):
+        """
+        If I did not own this file, and I am sharing this file, I will
+        call this function, to update /<my name>/shared/<link>/children,
+        which stores { "children": [("child1", "child1 link"),
+                                    ("child2", "child2 new link),
+                      "signature" : Asymmetric_sign(children)}
+        Use signature to defend against attack, which might replace info in children,
+        once we revoke, someone who has no access might have access now.
+        link and who's shared to dont have to be a secret
+        :param link: the link that points to the secrets
+        :param user_to_share
+        :return:
+        """
+        children_path = path_join(self.username, "shared", link, "children")
+        children_data = self.storage_server.get(children_path)
+        children_data = from_json_string(children_data)
+        children = children_data["children"]
+        signature = children_data["signature"]
+        verify = self.crypto.asymmetric_verify(to_json_string(children),
+                                               signature,
+                                               self.pks.get_public_key(self.username))
+        if not verify:
+            raise IntegrityError("When I am updating children directory, data has been compromised.")
+
+        children.append(user_to_share)
+        new_signature = self.crypto.asymmetric_sign(to_json_string(children), self.private_key)
+        children_data["children"] = children
+        children_data["signature"] = new_signature
+        self.storage_server.put(children_path, to_json_string(children_data))
+
+    def get_children(self, user_name, link):
+        """
+        Return a list of children of user_name, each child is [name, link]
+        :param link:
+        :param user_name
+        :return:
+        """
+        children_data = self.storage_server.get(path_join(user_name, "shared", link, "children"))
+        children_data = from_json_string(children_data)
+        children = children_data["children"]
+        signature = children_data["signature"]
+        verify = self.crypto.asymmetric_verify(to_json_string(children),
+                                               signature,
+                                               self.pks.get_public_key(user_name))
+        if not verify:
+            raise IntegrityError("Children Data has been compromised!")
+        return children
