@@ -13,6 +13,7 @@ from base_client import BaseClient, IntegrityError
 from crypto import CryptoError
 from util import to_json_string
 from util import from_json_string
+from util import compute_edits
 
 
 def path_join(*strings):
@@ -24,12 +25,31 @@ def path_join(*strings):
     return '/'.join(strings)
 
 
+def update_data_with_changelog(data, changelog):
+    """
+    update data with changelog
+    :param data: a string
+    :param changelog: a list of edits
+    :return: updated data, a string
+    """
+    data_list = list(data)
+    for index, new_string in changelog:
+        length = len(new_string)
+        offset = 0
+        while length > 0:
+            data_list[index + offset] = new_string[offset]
+            length -= 1
+            offset += 1
+    return "".join(data_list)
+
+
 class Client(BaseClient):
     def __init__(self, storage_server, public_key_server, crypto_object,
                  username):
         super().__init__(storage_server, public_key_server, crypto_object,
                          username)
         info_path = path_join("information", username)
+        self.cache = {}
         if not self.storage_server.get(info_path):
 
             # Store the client's information node
@@ -40,7 +60,8 @@ class Client(BaseClient):
             self.update_information(info)
 
     def upload(self, name, value):
-
+        new_file = True
+        different_length = False
         info = self.get_information()
 
         if name in info["files_I_own"]:
@@ -48,6 +69,7 @@ class Client(BaseClient):
             k_a = info["files_I_own"][name]["k_a"]
             r = info["files_I_own"][name]["r"]
             username = self.username
+            new_file = False
 
         elif name in info["files_shared_to_me"]:
             link = info["files_shared_to_me"][name][0]
@@ -58,6 +80,7 @@ class Client(BaseClient):
             k_a = secret["k_a"]
             r = secret["r"]
             username = secret["from_user"]
+            new_file = False
         else:
             # first time uploading a file
             k_e = self.crypto.get_random_bytes(16)
@@ -73,25 +96,77 @@ class Client(BaseClient):
             info["files_I_own"][name]["users"] = []
             self.update_information(info)
 
-        # use k_e to encrypt the file
-        crypto_iv = self.crypto.get_random_bytes(16)
-        encrypted_file = self.crypto.symmetric_encrypt(value, k_e,
-                                                       cipher_name='AES',
-                                                       mode_name='CBC',
-                                                       iv=crypto_iv)
 
-        cipher_text = to_json_string({"crypto_iv":  crypto_iv,
-                                      "encrypted_file": encrypted_file})
-
+        # Paths
         data_path = path_join(username, r)
-        self.storage_server.put(data_path, cipher_text)
+        size_path = path_join(data_path, "size")
 
-        MAC_data = cipher_text + r
-        MAC_tag = self.crypto.message_authentication_code(MAC_data,
-                                                          k_a,
-                                                          hash_name='SHA256')
-        MAC_path = path_join(username, "metadata", r)
-        self.storage_server.put(MAC_path, MAC_tag)
+        if not new_file:
+            server_size = self.get_size(r, k_e, k_a, username)
+
+            if server_size != len(value):
+                different_length = True
+            else:
+                if name not in self.cache:
+                    self.download(name)
+                # Always update the local copy to the latest version online
+                server_changelog = self.get_changelog(r, k_e, k_a, username)
+                local_copy = self.cache[name]["data"]
+                local_copy = update_data_with_changelog(local_copy, server_changelog)
+                self.cache[name]["data"] = value
+                changelog = compute_edits(local_copy, value)
+                server_changelog.extend(changelog)
+                self.upload_changelog(r, k_e, k_a, username, server_changelog)
+
+        # Do full upload for a new file or file with different length
+        if new_file or different_length:
+
+            changelog = []
+
+            self.cache[name] = {}
+            self.cache[name]["data"] = value
+            self.cache[name]["size"] = len(value)
+
+            # Encrypt the file, and upload
+            crypto_iv = self.crypto.get_random_bytes(16)
+            encrypted_file = self.crypto.symmetric_encrypt(value, k_e,
+                                                           cipher_name='AES',
+                                                           mode_name='CBC',
+                                                           iv=crypto_iv)
+
+            cipher_text = to_json_string({"crypto_iv":  crypto_iv,
+                                          "encrypted_file": encrypted_file})
+
+            self.storage_server.put(data_path, cipher_text)
+
+            # MAC the file
+            MAC_data = cipher_text + r
+            MAC_tag = self.crypto.message_authentication_code(MAC_data,
+                                                              k_a,
+                                                              hash_name='SHA256')
+            MAC_path = path_join(username, "metadata", r)
+            self.storage_server.put(MAC_path, MAC_tag)
+
+            # Encrypt the size, and upload
+            crypto_iv = self.crypto.get_random_bytes(16)
+            encrypted_size = self.crypto.symmetric_encrypt(to_json_string(len(value)), k_e,
+                                                           cipher_name='AES',
+                                                           mode_name='CBC',
+                                                           iv=crypto_iv)
+
+            cipher_text = to_json_string({"iv":  crypto_iv,
+                                          "size": encrypted_size})
+
+            self.storage_server.put(size_path, cipher_text)
+
+            # MAC the size
+            MAC_data = cipher_text + r
+            MAC_tag = self.crypto.message_authentication_code(MAC_data,
+                                                              k_a,
+                                                              hash_name='SHA256')
+            MAC_path = path_join(username, "metadata", r, "size")
+            self.storage_server.put(MAC_path, MAC_tag)
+            self.upload_changelog(r, k_e, k_a, username, changelog)
 
     def download(self, name):
         info = self.get_information()
@@ -116,6 +191,7 @@ class Client(BaseClient):
 
         # Get the data using k_n
         data_path = path_join(username, r)
+
         cipher_text = self.storage_server.get(data_path)
 
         # Verify cipher_text if not none
@@ -128,7 +204,7 @@ class Client(BaseClient):
             MAC_tag = self.storage_server.get(MAC_path)
 
             if MAC_tag != MAC_tag_computed:
-                raise IntegrityError("MACs do not match!")
+                raise IntegrityError("MACs for ciphertext do not match!")
 
             cipher_text_dict = from_json_string(cipher_text)
             downloaded_iv = cipher_text_dict["crypto_iv"]
@@ -140,9 +216,19 @@ class Client(BaseClient):
                                                      cipher_name='AES',
                                                      mode_name='CBC',
                                                      iv=downloaded_iv)
-                return data
             except ValueError:
                 raise IntegrityError("Data compromised, possibly IV is messed up!")
+
+            changelog = self.get_changelog(r, k_e, k_a, username)
+
+            if changelog:
+                data = update_data_with_changelog(data, changelog)
+
+            self.cache[name] = {}
+            self.cache[name]["data"] = data
+            self.cache[name]["size"] = len(data)
+            return data
+
         return None
 
     def share(self, user, name):
@@ -261,7 +347,7 @@ class Client(BaseClient):
 
         data = self.download(name)
         self.update_information(info)
-        self.upload(name, data)
+        self.revoke_reupload(name, data)
 
     def update_information(self, new_info):
         """
@@ -448,3 +534,160 @@ class Client(BaseClient):
         if not verify:
             raise IntegrityError("Children Data has been compromised!")
         return children
+
+    def get_changelog(self, r, k_e, k_a, username):
+        """
+        Get Changelog of file under R
+        :return:
+        :param r:
+        :param k_e:
+        :param k_a:
+        :param username:
+        :return:
+        """
+
+        data_path = path_join(username, r)
+        changlog_path = path_join(data_path, "changelog")
+        changelog_cipher_text = self.storage_server.get(changlog_path)
+
+        if changelog_cipher_text:
+            MAC_data = changelog_cipher_text + r
+            MAC_tag_computed = self.crypto.message_authentication_code(MAC_data,
+                                                                       k_a,
+                                                                       hash_name='SHA256')
+            MAC_path = path_join(username, "metadata", r, "changelog")
+            MAC_tag = self.storage_server.get(MAC_path)
+
+            if MAC_tag != MAC_tag_computed:
+                raise IntegrityError("MACs for changelog do not match!")
+
+            changelog_cipher_text_dict = from_json_string(changelog_cipher_text)
+            changelog_iv = changelog_cipher_text_dict["iv"]
+            encrypted_cipher_text = changelog_cipher_text_dict["changelog"]
+            try:
+                changelog = self.crypto.symmetric_decrypt(encrypted_cipher_text,
+                                                     k_e,
+                                                     cipher_name='AES',
+                                                     mode_name='CBC',
+                                                     iv=changelog_iv)
+                return from_json_string(changelog)
+            except ValueError:
+                raise IntegrityError("changelog compromised, possibly IV is messed up!")
+
+        return []
+
+    def upload_changelog(self, r, k_e, k_a, username, changelog):
+        data_path = path_join(username, r)
+        changelog_path = path_join(data_path, "changelog")
+        crypto_iv = self.crypto.get_random_bytes(16)
+        encrypted_changelog = self.crypto.symmetric_encrypt(to_json_string(changelog), k_e,
+                                                       cipher_name='AES',
+                                                       mode_name='CBC',
+                                                       iv=crypto_iv)
+
+        cipher_text = to_json_string({"iv":  crypto_iv,
+                                      "changelog": encrypted_changelog})
+
+        self.storage_server.put(changelog_path, cipher_text)
+
+        # MAC the changelog
+        MAC_data = cipher_text + r
+        MAC_tag = self.crypto.message_authentication_code(MAC_data,
+                                                          k_a,
+                                                          hash_name='SHA256')
+        MAC_path = path_join(username, "metadata", r, "changelog")
+        self.storage_server.put(MAC_path, MAC_tag)
+
+
+    def get_size(self, r, k_e, k_a, username):
+        data_path = path_join(username, r)
+        size_path = path_join(data_path, "size")
+
+        encrypted_size = self.storage_server.get(size_path)
+
+        # Download size
+        if encrypted_size:
+            MAC_data = encrypted_size + r
+            MAC_tag_computed = self.crypto.message_authentication_code(MAC_data,
+                                                                       k_a,
+                                                                       hash_name='SHA256')
+            MAC_path = path_join(username, "metadata", r, "size")
+            MAC_tag = self.storage_server.get(MAC_path)
+
+            if MAC_tag != MAC_tag_computed:
+                raise IntegrityError("MACs for size do not match!")
+
+            encrypted_size_dict = from_json_string(encrypted_size)
+            size_iv = encrypted_size_dict["iv"]
+            size_cipher_text = encrypted_size_dict["size"]
+            try:
+                server_size = self.crypto.symmetric_decrypt(size_cipher_text,
+                                                     k_e,
+                                                     cipher_name='AES',
+                                                     mode_name='CBC',
+                                                     iv=size_iv)
+            except ValueError:
+                raise IntegrityError("Size info compromised, possibly IV is messed up!")
+        else:
+            raise ValueError("someone deleted size")
+
+        return from_json_string(server_size)
+
+    def revoke_reupload(self, name, value):
+        info = self.get_information()
+        k_e = info["files_I_own"][name]["k_e"]
+        k_a = info["files_I_own"][name]["k_a"]
+        r = info["files_I_own"][name]["r"]
+        username = self.username
+
+        data_path = path_join(username, r)
+        size_path = path_join(data_path, "size")
+
+        changelog = []
+
+        self.cache[name] = {}
+        self.cache[name]["data"] = value
+        self.cache[name]["size"] = len(value)
+
+        # Encrypt the file, and upload
+        crypto_iv = self.crypto.get_random_bytes(16)
+        encrypted_file = self.crypto.symmetric_encrypt(value, k_e,
+                                                       cipher_name='AES',
+                                                       mode_name='CBC',
+                                                       iv=crypto_iv)
+
+        cipher_text = to_json_string({"crypto_iv":  crypto_iv,
+                                      "encrypted_file": encrypted_file})
+
+        self.storage_server.put(data_path, cipher_text)
+
+        # MAC the file
+        MAC_data = cipher_text + r
+        MAC_tag = self.crypto.message_authentication_code(MAC_data,
+                                                          k_a,
+                                                          hash_name='SHA256')
+        MAC_path = path_join(username, "metadata", r)
+        self.storage_server.put(MAC_path, MAC_tag)
+
+        # Encrypt the size, and upload
+        crypto_iv = self.crypto.get_random_bytes(16)
+        encrypted_size = self.crypto.symmetric_encrypt(to_json_string(len(value)), k_e,
+                                                       cipher_name='AES',
+                                                       mode_name='CBC',
+                                                       iv=crypto_iv)
+
+        cipher_text = to_json_string({"iv":  crypto_iv,
+                                      "size": encrypted_size})
+
+        self.storage_server.put(size_path, cipher_text)
+
+        # MAC the size
+        MAC_data = cipher_text + r
+        MAC_tag = self.crypto.message_authentication_code(MAC_data,
+                                                          k_a,
+                                                          hash_name='SHA256')
+        MAC_path = path_join(username, "metadata", r, "size")
+        self.storage_server.put(MAC_path, MAC_tag)
+        self.upload_changelog(r, k_e, k_a, username, changelog)
+
+
